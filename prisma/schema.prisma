@@ -8,19 +8,52 @@ datasource db {
 }
 
 model PaymentRequest {
-  id          String   @id @default(uuid())
-  requestId   String   @unique
-  price       String
-  asset       String   @default("STX")
-  recipient   String
-  target      String
-  method      String   @default("POST")
-  headers     Json?
-  body        Json?
-  status      String   @default("IDLE") // IDLE, PENDING, PAID, FAILED
-  txId        String?  @unique
-  successUrl  String?
-  cancelUrl   String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id            String   @id @default(uuid())
+  requestId     String   @unique
+  price         String
+  asset         String   @default("STX")
+  recipient     String
+  target        String
+  method        String   @default("POST")
+  headers       Json?
+  body          Json?
+  status        String   @default("IDLE") // IDLE, PENDING, PAID, FAILED
+  txId          String?  @unique
+  successUrl    String?
+  cancelUrl     String?
+  failureReason String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model API {
+  id              String       @id @default(uuid())
+  name            String
+  originalUrl     String
+  pricePerRequest Float
+  stacksAddress   String
+  network         String       @default("testnet")
+  isActive        Boolean      @default(true)
+  createdAt       DateTime     @default(now())
+  payments        Payment[]
+  requests        APIRequest[]
+}
+
+model Payment {
+  id           String   @id @default(uuid())
+  apiId        String?
+  api          API?     @relation(fields: [apiId], references: [id])
+  txHash       String   @unique
+  amount       Float
+  payerAddress String
+  createdAt    DateTime @default(now())
+}
+
+model APIRequest {
+  id         String   @id @default(uuid())
+  apiId      String
+  api        API      @relation(fields: [apiId], references: [id])
+  success    Boolean
+  responseMs Int
+  createdAt  DateTime @default(now())
 }

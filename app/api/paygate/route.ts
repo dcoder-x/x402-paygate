@@ -1,98 +1,90 @@
 import { NextRequest, NextResponse } from "next/server";
-import { storage } from "@/lib/storage";
-import { replayProtection } from "@/lib/replay";
-import { forwardRequest } from "@/lib/proxy";
-import { PayGateRequest, PaymentRequest } from "@/lib/types";
+import { verifyPayment, createPaymentRequiredResponse } from "@/lib/paygate";
+import { X402_HEADERS } from "x402-stacks";
 
 export async function POST(req: NextRequest) {
     try {
-        const body: PayGateRequest = await req.json();
-        const requestIdHeader = req.headers.get("X-X402-RequestId");
-        const domain = req.headers.get("host") || "localhost:3000";
-        const protocol = process.env.NODE_ENV === "production" ? "https" : "http";
-        const baseUrl = `${protocol}://${domain}`;
+        let body: any;
+        try {
+            // Clone request to avoid "Body is unusable" if read multiple times
+            // actually we read it once.
+            body = await req.json();
+        } catch (e) {
+            return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+        }
 
         // Validate required fields
-        if (!body.price || !body.recipient || !body.asset) {
+        if (!body.target || !body.price || !body.recipient) {
             return NextResponse.json({
-                error: "Missing required fields: price, recipient, asset"
+                error: "Missing required fields: target, price, recipient"
             }, { status: 400 });
         }
 
-        // 1. New Request (No Header)
-        if (!requestIdHeader) {
-            const requestId = "req_" + Math.random().toString(36).substring(2, 11) + Date.now().toString(36);
+        const network = body.network || "testnet";
+        const sigHeader = req.headers.get(X402_HEADERS.PAYMENT_SIGNATURE);
 
-            const paymentRequest: PaymentRequest = {
-                ...body,
-                requestId,
-                status: "IDLE",
-                createdAt: Date.now(),
-                successUrl: body.successUrl,
-                cancelUrl: body.cancelUrl
-            };
+        // 1. Check for Payment Proof
+        if (sigHeader) {
+            const verification = await verifyPayment(
+                sigHeader,
+                parseFloat(body.price),
+                body.recipient,
+                network
+            );
 
-            await storage.create(requestId, paymentRequest);
+            if (verification.success) {
+                // Payment valid -> Proxy request
+                // For Proxy Mode, we assume the valid request payload is in body.body
+                // or we just forward the request to target.
 
-            return NextResponse.json({
-                error: "Payment Required",
-                code: "X402_PAYMENT_REQUIRED",
-                payment: {
-                    requestId,
-                    checkoutUrl: `${baseUrl}/checkout/${requestId}`,
-                    network: "stacks-testnet",
-                    asset: "STX",
-                    amount: body.price,
-                    recipient: body.recipient,
-                    expiresAt: Date.now() + 3600000 // 1 hour
-                }
-            }, { status: 402 });
+                const targetUrl = new URL(body.target);
+                const headers = new Headers(req.headers);
+                headers.delete("host");
+                headers.delete(X402_HEADERS.PAYMENT_SIGNATURE);
+                headers.delete("content-length");
+
+                const payload = body.body ? JSON.stringify(body.body) : undefined;
+
+                const response = await fetch(targetUrl.toString(), {
+                    method: body.method || "POST",
+                    headers: headers,
+                    body: payload
+                });
+
+                // Return proxy response
+                // Copy headers from response to NextResponse
+                const resHeaders = new Headers(response.headers);
+
+                return new NextResponse(response.body, {
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers: resHeaders
+                });
+
+            } else {
+                return NextResponse.json({
+                    success: false,
+                    error: "Payment verification failed",
+                    details: verification.error
+                }, { status: 402 });
+            }
         }
 
-        // 2. Existing Request (With Header)
-        const requestId = requestIdHeader;
-        const requestData = await storage.get(requestId);
-
-        if (!requestData) {
-            return NextResponse.json({ error: "Invalid Request ID" }, { status: 400 });
-        }
-
-        if (requestData.status !== "PAID" && requestData.status !== "COMPLETED") {
-            return NextResponse.json({ error: "Payment not confirmed" }, { status: 402 });
-        }
-
-        // Replay Protection (Request Level)
-        if (requestData.status === "COMPLETED") {
-            // Optional: Allow replay if idempotent? For now, strict 1-time use as per plan.
-            return NextResponse.json({ error: "Request already consumed" }, { status: 409 });
-        }
-
-        // Replay Protection (Tx Level) - Double check
-        if (requestData.txId && replayProtection.has(requestData.txId)) {
-            // Technically this should have been caught at verification time, but good to be safe
-        }
-        if (requestData.txId) replayProtection.add(requestData.txId);
-
-        // Forward
-        const result = await forwardRequest(
-            requestData.target,
-            requestData.method,
-            requestData.headers,
-            requestData.body // Use stored body
+        // 2. No Payment -> Return V2 402 Payment Required
+        return createPaymentRequiredResponse(
+            parseFloat(body.price),
+            body.recipient,
+            {
+                url: body.target,
+                description: "Proxy Request Access"
+            },
+            network
         );
 
-        // Mark as consumed
-        await storage.updateStatus(requestId, "COMPLETED");
-
-        return NextResponse.json({
-            status: "success",
-            forwarded: true,
-            data: result
-        });
-
     } catch (e: any) {
-        console.error("PayGate Error:", e);
+        console.error("PayGate Proxy Error:", e);
         return NextResponse.json({
+            success: false,
             error: "Internal Server Error",
             details: e.message
         }, { status: 500 });

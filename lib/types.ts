@@ -6,8 +6,6 @@ export interface PayGateRequest {
     recipient: string;
     body?: any;
     headers?: Record<string, string>;
-    successUrl?: string;
-    cancelUrl?: string;
 }
 
 export interface PaymentRequest extends PayGateRequest {
@@ -17,6 +15,7 @@ export interface PaymentRequest extends PayGateRequest {
     txId?: string;
     successUrl?: string;
     cancelUrl?: string;
+    failureReason?: string;
 }
 
 export interface PayGateResponse {
